@@ -2253,7 +2253,17 @@ fn reorder_row_visually(point_scale: PointScale, row: &mut Row) {
         let mut place = |b: usize| {
             for i in blocks[b].clone() {
                 let glyph = &mut glyphs[i];
-                glyph.pos.x = point_scale.round_to_pixel(pen + (glyph.pos.x - origins[b]));
+                // Invisible continuations stand after their shaping cluster in logical
+                // order. In an RTL run that trailing edge is the block's left edge,
+                // not the right edge where shaping originally emitted them. Keep
+                // visible zero-width marks at their shaped offsets over the base.
+                let offset =
+                    if glyph.is_rtl() && glyph.advance_width == 0.0 && glyph.uv_rect.is_nothing() {
+                        0.0
+                    } else {
+                        glyph.pos.x - origins[b]
+                    };
+                glyph.pos.x = point_scale.round_to_pixel(pen + offset);
                 visual_order.push(i as u32);
             }
             pen += widths[b];
@@ -2353,6 +2363,43 @@ mod tests {
             FontId::proportional(14.0),
             Color32::WHITE,
         )
+    }
+
+    /// A ligature has one advancing glyph followed by invisible character continuations.
+    /// Its logical end must remain on the trailing edge after RTL reordering.
+    #[test]
+    fn rtl_ligature_continuations_end_at_the_cluster_left_edge() {
+        for level in [0, 1, 2, 3] {
+            let galley = layout_without_fonts("abcd", MissingGlyphPolicy::Tofu);
+            let mut row = (*galley.rows[0].row).clone();
+            row.visual_order.clear();
+            row.rtl_paragraph = level % 2 == 1;
+            row.size.x = 20.0;
+            for (i, glyph) in row.glyphs.iter_mut().enumerate() {
+                glyph.pos.x = if i == 0 { 0.0 } else { 20.0 };
+                glyph.advance_width = if i == 0 { 20.0 } else { 0.0 };
+                glyph.bidi_level = level;
+                if i > 0 {
+                    glyph.uv_rect = Default::default();
+                }
+            }
+            reorder_row_visually(PointScale::new(1.0), &mut row);
+            let (start, end) = if level % 2 == 1 {
+                (20.0, 0.0)
+            } else {
+                (0.0, 20.0)
+            };
+            assert_eq!(
+                row.x_offset(super::super::CharIndex(0)),
+                start,
+                "level {level}: cluster start"
+            );
+            assert_eq!(
+                row.x_offset(super::super::CharIndex(4)),
+                end,
+                "level {level}: cluster end"
+            );
+        }
     }
 
     /// Chinese closes a clause with full-width marks (，：；？！）), and those must never start a row:
